@@ -3,6 +3,7 @@ import { handleRequest } from '../utils/handler';
 function processM3U8Content(content, mediaUrl, origin, headers) {
 	const hasHeaders = headers && Object.keys(headers).length > 0;
 	const _headers = hasHeaders ? `&headers=${btoa(JSON.stringify(headers))}` : '';
+
 	return content
 		.split('\n')
 		.map((line) => {
@@ -40,7 +41,6 @@ function processM3U8Content(content, mediaUrl, origin, headers) {
 }
 
 async function proxy(request) {
-	// console.log(`Processing ${request.method} request for: ${request.url}`);
 	if (request.method === 'OPTIONS') {
 		return new Response(null, {
 			status: 204,
@@ -88,9 +88,7 @@ async function proxy(request) {
 		};
 
 		const contentType = response.headers.get('Content-Type') || '';
-
 		const urlIndication = mediaUrl.toLowerCase().includes('.m3u8') || mediaUrl.toLowerCase().includes('/playlist');
-
 		let responseContent = await response.text();
 		const contentLooksLikeM3U8 = responseContent.trimStart().startsWith('#EXTM3U');
 
@@ -103,7 +101,6 @@ async function proxy(request) {
 
 		if (isM3U8) {
 			responseContent = processM3U8Content(responseContent, mediaUrl, origin, decodedHeaders);
-
 			responseHeaders['Content-Type'] = 'application/vnd.apple.mpegurl';
 			return new Response(responseContent, {
 				status: response.status,
@@ -127,6 +124,15 @@ async function proxy(request) {
 					headers: fetchHeaders,
 				});
 				const arrayBuffer = await binaryResponse.arrayBuffer();
+
+				// Check referer to detect if it's a child stream from M3U8
+				const referer = request.headers.get('Referer') || '';
+				const isChildM3U8 = referer.includes('/proxy?url=') && referer.includes('.m3u8');
+
+				if (isChildM3U8) {
+					responseHeaders['Content-Type'] = 'video/mp2t';
+				}
+
 				return new Response(arrayBuffer, {
 					status: binaryResponse.status,
 					headers: responseHeaders,
