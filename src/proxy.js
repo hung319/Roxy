@@ -1,23 +1,17 @@
-import { handleRequest } from '../utils/handler';
+import { handleRequest } from '../utils/handler'; // Đảm bảo đường dẫn này đúng với cấu trúc dự án của bạn
 
-// --- Cải tiến #1: Khai báo header mẫu để kiểm tra ---
-// TODO: Người dùng cần xác nhận hoặc thay đổi chuỗi byte này cho phù hợp với "header PNG 1x1 7 byte" cụ thể của họ.
-// Ví dụ: 7 byte đầu của chữ ký PNG tiêu chuẩn (0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A)
-const EXPECTED_HEADER_BYTES = [137, 80, 78, 71, 13, 10, 26]; // Dạng số thập phân
+// --- Cấu hình quan trọng: Header "ảnh" cần kiểm tra và xóa ---
+// TODO: BẠN CẦN CẬP NHẬT CHUỖI BYTE NÀY!
+// Đây là 7 byte đầu của chữ ký PNG tiêu chuẩn làm ví dụ.
+// Hãy thay thế bằng 7 byte (hoặc số lượng byte chính xác) của header "ảnh" mà bạn muốn xóa.
+// Ví dụ: const EXPECTED_HEADER_BYTES = [137, 80, 78, 71, 13, 10, 26]; (dạng số thập phân)
+const EXPECTED_HEADER_BYTES = [137, 80, 78, 71, 13, 10, 26]; // << THAY ĐỔI CÁI NÀY!!!
 const BYTES_TO_CHECK_AND_STRIP = EXPECTED_HEADER_BYTES.length;
 
 /**
- * --- Cải tiến #6: Xử lý nội dung M3U8 ---
- * Hàm này xử lý nội dung M3U8 để proxy các URL bên trong.
- * Nó tìm kiếm và thay thế:
- * 1. Các URL trong thuộc tính URI="...", ví dụ:
- * - #EXT-X-KEY:METHOD=AES-128,URI="https://example.com/key.bin"
- * - #EXT-X-MAP:URI="main.mp4"
- * - #EXT-X-MEDIA:TYPE=AUDIO,URI="audio.m3u8"
- * 2. Các URL đứng riêng một dòng (thường là các segment .ts hoặc các playlist M3U8 con).
- *
- * Regex /(URI=)(["'])(?<uri>.*?)\2/ được sử dụng để trích xuất URI từ các thuộc tính.
- * Tất cả các URL được giải quyết tương đối với URL của M3U8 gốc (mediaUrl).
+ * Xử lý nội dung M3U8 để proxy các URL bên trong.
+ * Tìm và thay thế các URL trong thuộc tính URI="..." (ví dụ: #EXT-X-KEY, #EXT-X-MAP)
+ * và các URL đứng riêng một dòng (segment .ts hoặc playlist M3U8 con).
  */
 function processM3U8Content(content, mediaUrl, origin, headers) {
 	const hasHeaders = headers && Object.keys(headers).length > 0;
@@ -25,7 +19,6 @@ function processM3U8Content(content, mediaUrl, origin, headers) {
 	return content
 		.split('\n')
 		.map((line) => {
-			// Kiểm tra các thuộc tính URI="<url>"
 			const uriMatch = line.match(/(URI=)(["'])(?<uri>.*?)\2/);
 			if (uriMatch) {
 				const [fullMatch, prefix, quote] = uriMatch;
@@ -35,17 +28,14 @@ function processM3U8Content(content, mediaUrl, origin, headers) {
 					return line.replace(fullMatch, `${prefix}${quote}${proxyUrl}${quote}`);
 				} catch (error) {
 					console.error(`Error processing M3U8 URI attribute: ${uriMatch.groups.uri} in line "${line}"`, error);
-					return line; // Trả về dòng gốc nếu có lỗi
+					return line;
 				}
 			}
 
-			// Dòng #EXT-X-STREAM-INF đứng trước URL của một variant stream.
-			// Bản thân dòng này không chứa URL cần proxy, URL nằm ở dòng kế tiếp.
 			if (line.startsWith('#EXT-X-STREAM-INF')) {
 				return line;
 			}
 
-			// Xử lý các URL đứng riêng một dòng (ví dụ: segment .ts hoặc M3U8 con)
 			if (!line.startsWith('#') && line.trim()) {
 				try {
 					const resolvedUrl = new URL(line.trim(), mediaUrl).toString();
@@ -53,18 +43,15 @@ function processM3U8Content(content, mediaUrl, origin, headers) {
 					return proxyUrl;
 				} catch (error) {
 					console.error(`Error processing M3U8 segment/playlist URL: ${line.trim()}`, error);
-					return line; // Trả về dòng gốc nếu có lỗi
+					return line;
 				}
 			}
-
-			// Trả về các dòng khác (comment, các tag không chứa URI cần proxy)
 			return line;
 		})
 		.join('\n');
 }
 
 async function proxy(request) {
-	// console.log(`Processing ${request.method} request for: ${request.url}`);
 	if (request.method === 'OPTIONS') {
 		return new Response(null, {
 			status: 204,
@@ -105,6 +92,8 @@ async function proxy(request) {
 		);
 		delete cleanHeaders['Access-Control-Allow-Origin'];
 		delete cleanHeaders['access-control-allow-origin'];
+		// Giữ lại Content-Length và Content-Range gốc từ server nếu có,
+		// chúng sẽ được trình duyệt/runtime điều chỉnh nếu nội dung Response thay đổi.
 		const responseHeaders = {
 			...cleanHeaders,
 			'Access-Control-Allow-Origin': '*',
@@ -112,8 +101,7 @@ async function proxy(request) {
 		};
 
 		const contentType = response.headers.get('Content-Type') || '';
-
-		let responseContentAsText = await response.text(); // Đọc response dưới dạng text trước để kiểm tra M3U8
+		let responseContentAsText = await response.text();
 		const contentLooksLikeM3U8 = responseContentAsText.trimStart().startsWith('#EXTM3U');
 
 		const isM3U8 =
@@ -125,39 +113,35 @@ async function proxy(request) {
 
 		if (isM3U8) {
 			const processedM3U8Content = processM3U8Content(responseContentAsText, mediaUrl, origin, decodedHeaders);
-			responseHeaders['Content-Type'] = 'application/vnd.apple.mpegurl'; // Đảm bảo content type đúng
+			responseHeaders['Content-Type'] = 'application/vnd.apple.mpegurl';
 			return new Response(processedM3U8Content, {
 				status: response.status,
 				headers: responseHeaders,
 			});
 		}
 
-		// Xử lý nội dung không phải M3U8 (bao gồm các segments)
-		// if (!contentLooksLikeM3U8 && responseContentAsText.length > 0) { // Điều kiện này đã được bao hàm bởi !isM3U8
 		const hasManyNonPrintable =
 			responseContentAsText.split('').filter((char) => char.charCodeAt(0) < 32 && char !== '\n' && char !== '\r' && char !== '\t').length >
 			responseContentAsText.length * 0.1;
 
 		if (
 			hasManyNonPrintable ||
-			contentType.includes('video/') ||
-			contentType.includes('audio/') ||
-			contentType.includes('image/') ||
+			contentType.startsWith('video/') || // Kiểm tra video/
+			contentType.startsWith('audio/') || // Kiểm tra audio/
+			contentType.startsWith('image/') || // Kiểm tra image/ (trường hợp segment bị giả mạo)
 			contentType.includes('application/octet-stream')
 		) {
-			// Nội dung có vẻ là nhị phân, fetch lại dưới dạng ArrayBuffer
-			// (Hoặc nếu response.clone() được hỗ trợ và hiệu quả, có thể dùng response.clone().arrayBuffer())
-			// Tuy nhiên, fetch lại đơn giản và rõ ràng hơn trong nhiều trường hợp.
-			const binaryResponse = await fetch(mediaUrl, { // Fetch lại để lấy ArrayBuffer
+			const binaryResponse = await fetch(mediaUrl, {
 				headers: fetchHeaders,
 			});
 			if (!binaryResponse.ok) {
 				throw new Error(`HTTP error on binary re-fetch! status: ${binaryResponse.status} for ${mediaUrl}`);
 			}
 			let arrayBuffer = await binaryResponse.arrayBuffer();
+			let wasHeaderStripped = false;
 
-			// --- Cải tiến #1: Kiểm tra và xóa header nếu khớp ---
-			if (arrayBuffer.byteLength >= BYTES_TO_CHECK_AND_STRIP && EXPECTED_HEADER_BYTES.length > 0) {
+			// Chỉ xóa header nếu KHÔNG có Range header và các điều kiện khác thỏa mãn
+			if (!fetchHeaders['Range'] && arrayBuffer.byteLength >= BYTES_TO_CHECK_AND_STRIP && EXPECTED_HEADER_BYTES.length > 0) {
 				const firstBytes = new Uint8Array(arrayBuffer, 0, BYTES_TO_CHECK_AND_STRIP);
 				let matchesHeader = true;
 				for (let i = 0; i < BYTES_TO_CHECK_AND_STRIP; i++) {
@@ -166,24 +150,43 @@ async function proxy(request) {
 						break;
 					}
 				}
-
 				if (matchesHeader) {
-					// console.log(`Header matched. Stripping ${BYTES_TO_CHECK_AND_STRIP} bytes from segment: ${mediaUrl}`);
+					console.log(`Header matched for ${mediaUrl}. Original length: ${arrayBuffer.byteLength}. Stripping ${BYTES_TO_CHECK_AND_STRIP} bytes.`);
 					arrayBuffer = arrayBuffer.slice(BYTES_TO_CHECK_AND_STRIP);
+					wasHeaderStripped = true;
+					console.log(`New length for ${mediaUrl} after stripping: ${arrayBuffer.byteLength}.`);
 				} else {
-					// console.log(`Header did not match. Not stripping bytes from segment: ${mediaUrl}`);
+					console.log(`Header did NOT match for ${mediaUrl} (no Range request). Original length: ${arrayBuffer.byteLength}.`);
 				}
+			} else if (fetchHeaders['Range']) {
+				console.log(`Range header [${fetchHeaders['Range']}] present, skipping header stripping for segment: ${mediaUrl}`);
+			} else if (EXPECTED_HEADER_BYTES.length === 0) {
+				console.log(`Header stripping is disabled (EXPECTED_HEADER_BYTES is empty) for segment: ${mediaUrl}`);
+			} else {
+				console.log(`Segment ${mediaUrl} too short (${arrayBuffer.byteLength} bytes) or header check not applicable.`);
 			}
-			// --- Kết thúc Cải tiến #1 ---
 
+			if (wasHeaderStripped) {
+				const actualVideoContentType = 'video/mp2t'; // Đã xác nhận từ bạn
+				const originalContentTypeFromServer = binaryResponse.headers.get('Content-Type') || '';
+				responseHeaders['Content-Type'] = actualVideoContentType;
+				console.log(`Header stripped for ${mediaUrl}. Original Content-Type from server: '${originalContentTypeFromServer}'. Setting Content-Type to '${actualVideoContentType}'.`);
+			}
+			
+			// Nếu là Range request, status nên là 206. Nếu không, dùng status từ binaryResponse.
+			// fetchHeaders['Range'] là range client gửi cho proxy.
+			// binaryResponse.status là status server gốc trả về (có thể là 200 hoặc 206).
+			// Nếu client yêu cầu range, proxy yêu cầu range, server gốc trả 206 -> binaryResponse.status là 206.
+			// Nếu client không yêu cầu range, proxy không yêu cầu range, server gốc trả 200 -> binaryResponse.status là 200.
+			// Nếu wasHeaderStripped và không có Range request, status là 200.
+			// Nếu không có Range request và không strip, status là 200.
+			// Về cơ bản, status của binaryResponse là phù hợp.
 			return new Response(arrayBuffer, {
-				status: binaryResponse.status, // Sử dụng status từ binaryResponse
+				status: binaryResponse.status,
 				headers: responseHeaders,
 			});
 		}
-		// } // Kết thúc khối if (!contentLooksLikeM3U8 ...)
 
-		// Fallback cho các nội dung dạng text khác không phải M3U8 và không phải nhị phân theo các điều kiện trên
 		return new Response(responseContentAsText, {
 			status: response.status,
 			headers: responseHeaders,
