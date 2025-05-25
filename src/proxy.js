@@ -1,12 +1,14 @@
-import { handleRequest } from '../utils/handler'; // Đảm bảo đường dẫn này đúng với cấu trúc dự án của bạn
+import { handleRequest } from '../utils/handler'; // Đảm bảo đường dẫn này đúng
 
-// --- Cấu hình quan trọng: Header "ảnh" cần kiểm tra và xóa ---
-// TODO: BẠN CẦN CẬP NHẬT CHUỖI BYTE NÀY!
-// Đây là 7 byte đầu của chữ ký PNG tiêu chuẩn làm ví dụ.
-// Hãy thay thế bằng 7 byte (hoặc số lượng byte chính xác) của header "ảnh" mà bạn muốn xóa.
-// Ví dụ: const EXPECTED_HEADER_BYTES = [137, 80, 78, 71, 13, 10, 26]; (dạng số thập phân)
-const EXPECTED_HEADER_BYTES = [137, 80, 78, 71, 13, 10, 26]; // << THAY ĐỔI CÁI NÀY!!!
-const BYTES_TO_CHECK_AND_STRIP = EXPECTED_HEADER_BYTES.length;
+// --- Cấu hình quan trọng ---
+// 1. Chữ ký PNG tiêu chuẩn (8 byte) để kiểm tra
+const PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10]; // 8 byte chữ ký PNG
+const PNG_SIGNATURE_LENGTH = PNG_SIGNATURE.length; // Sẽ là 8
+
+// 2. TỔNG SỐ BYTE CẦN XÓA để đến được dữ liệu TS
+// Giá trị này được xác định từ phân tích file mẫu của bạn,
+// là offset từ đầu file đến byte 0x47 đầu tiên của luồng TS.
+const TOTAL_OFFSET_TO_TS_DATA = 7478;
 
 /**
  * Xử lý nội dung M3U8 để proxy các URL bên trong.
@@ -92,8 +94,6 @@ async function proxy(request) {
 		);
 		delete cleanHeaders['Access-Control-Allow-Origin'];
 		delete cleanHeaders['access-control-allow-origin'];
-		// Giữ lại Content-Length và Content-Range gốc từ server nếu có,
-		// chúng sẽ được trình duyệt/runtime điều chỉnh nếu nội dung Response thay đổi.
 		const responseHeaders = {
 			...cleanHeaders,
 			'Access-Control-Allow-Origin': '*',
@@ -126,12 +126,12 @@ async function proxy(request) {
 
 		if (
 			hasManyNonPrintable ||
-			contentType.startsWith('video/') || // Kiểm tra video/
-			contentType.startsWith('audio/') || // Kiểm tra audio/
-			contentType.startsWith('image/') || // Kiểm tra image/ (trường hợp segment bị giả mạo)
+			contentType.startsWith('video/') ||
+			contentType.startsWith('audio/') ||
+			contentType.startsWith('image/') || // Xử lý trường hợp segment bị giả mạo thành ảnh
 			contentType.includes('application/octet-stream')
 		) {
-			const binaryResponse = await fetch(mediaUrl, {
+			const binaryResponse = await fetch(mediaUrl, { // Fetch lại để lấy ArrayBuffer
 				headers: fetchHeaders,
 			});
 			if (!binaryResponse.ok) {
@@ -140,53 +140,69 @@ async function proxy(request) {
 			let arrayBuffer = await binaryResponse.arrayBuffer();
 			let wasHeaderStripped = false;
 
-			// Chỉ xóa header nếu KHÔNG có Range header và các điều kiện khác thỏa mãn
-			if (!fetchHeaders['Range'] && arrayBuffer.byteLength >= BYTES_TO_CHECK_AND_STRIP && EXPECTED_HEADER_BYTES.length > 0) {
-				const firstBytes = new Uint8Array(arrayBuffer, 0, BYTES_TO_CHECK_AND_STRIP);
-				let matchesHeader = true;
-				for (let i = 0; i < BYTES_TO_CHECK_AND_STRIP; i++) {
-					if (firstBytes[i] !== EXPECTED_HEADER_BYTES[i]) {
-						matchesHeader = false;
+			// Chỉ xóa header nếu KHÔNG có Range header và đủ độ dài để chứa toàn bộ phần header "ảnh"
+			if (!fetchHeaders['Range'] && arrayBuffer.byteLength >= TOTAL_OFFSET_TO_TS_DATA && PNG_SIGNATURE.length > 0) {
+				const firstPngSignatureBytes = new Uint8Array(arrayBuffer, 0, PNG_SIGNATURE_LENGTH);
+				let matchesPngSignature = true;
+				for (let i = 0; i < PNG_SIGNATURE_LENGTH; i++) {
+					if (firstPngSignatureBytes[i] !== PNG_SIGNATURE[i]) {
+						matchesPngSignature = false;
 						break;
 					}
 				}
-				if (matchesHeader) {
-					console.log(`Header matched for ${mediaUrl}. Original length: ${arrayBuffer.byteLength}. Stripping ${BYTES_TO_CHECK_AND_STRIP} bytes.`);
-					arrayBuffer = arrayBuffer.slice(BYTES_TO_CHECK_AND_STRIP);
+
+				if (matchesPngSignature) {
+					console.log(`PNG signature matched for ${mediaUrl}. Original length: ${arrayBuffer.byteLength}. Stripping ${TOTAL_OFFSET_TO_TS_DATA} bytes to reach TS data.`);
+					arrayBuffer = arrayBuffer.slice(TOTAL_OFFSET_TO_TS_DATA); // Xóa toàn bộ phần header "ảnh"
 					wasHeaderStripped = true;
 					console.log(`New length for ${mediaUrl} after stripping: ${arrayBuffer.byteLength}.`);
 				} else {
-					console.log(`Header did NOT match for ${mediaUrl} (no Range request). Original length: ${arrayBuffer.byteLength}.`);
+					console.log(`PNG signature NOT matched for ${mediaUrl}. Not stripping. Original length: ${arrayBuffer.byteLength}.`);
 				}
 			} else if (fetchHeaders['Range']) {
 				console.log(`Range header [${fetchHeaders['Range']}] present, skipping header stripping for segment: ${mediaUrl}`);
-			} else if (EXPECTED_HEADER_BYTES.length === 0) {
-				console.log(`Header stripping is disabled (EXPECTED_HEADER_BYTES is empty) for segment: ${mediaUrl}`);
-			} else {
-				console.log(`Segment ${mediaUrl} too short (${arrayBuffer.byteLength} bytes) or header check not applicable.`);
+			} else if (PNG_SIGNATURE.length === 0) { // Trường hợp không muốn kiểm tra signature PNG
+				console.log(`PNG signature check is disabled (PNG_SIGNATURE is empty). Stripping ${TOTAL_OFFSET_TO_TS_DATA} bytes directly if no Range header and length permits.`);
+                if (!fetchHeaders['Range'] && arrayBuffer.byteLength >= TOTAL_OFFSET_TO_TS_DATA) {
+                    arrayBuffer = arrayBuffer.slice(TOTAL_OFFSET_TO_TS_DATA);
+                    wasHeaderStripped = true;
+                }
+			} else { // Các trường hợp khác: arrayBuffer quá ngắn, v.v.
+				console.log(`Segment ${mediaUrl} too short (${arrayBuffer.byteLength} bytes for offset ${TOTAL_OFFSET_TO_TS_DATA}), or PNG_SIGNATURE check not applicable/failed, or Range header present. Not stripping.`);
 			}
 
 			if (wasHeaderStripped) {
-				const actualVideoContentType = 'video/mp2t'; // Đã xác nhận từ bạn
+				const actualVideoContentType = 'video/mp2t'; // Đã xác nhận
 				const originalContentTypeFromServer = binaryResponse.headers.get('Content-Type') || '';
 				responseHeaders['Content-Type'] = actualVideoContentType;
 				console.log(`Header stripped for ${mediaUrl}. Original Content-Type from server: '${originalContentTypeFromServer}'. Setting Content-Type to '${actualVideoContentType}'.`);
 			}
 			
-			// Nếu là Range request, status nên là 206. Nếu không, dùng status từ binaryResponse.
-			// fetchHeaders['Range'] là range client gửi cho proxy.
-			// binaryResponse.status là status server gốc trả về (có thể là 200 hoặc 206).
-			// Nếu client yêu cầu range, proxy yêu cầu range, server gốc trả 206 -> binaryResponse.status là 206.
-			// Nếu client không yêu cầu range, proxy không yêu cầu range, server gốc trả 200 -> binaryResponse.status là 200.
-			// Nếu wasHeaderStripped và không có Range request, status là 200.
-			// Nếu không có Range request và không strip, status là 200.
-			// Về cơ bản, status của binaryResponse là phù hợp.
+            // Log các byte đầu của dữ liệu gửi đi (rất quan trọng để kiểm tra)
+			if (arrayBuffer.byteLength > 0) {
+                const firstFewBytesOfOutput = new Uint8Array(arrayBuffer, 0, Math.min(20, arrayBuffer.byteLength));
+                const byteString = Array.from(firstFewBytesOfOutput).map(b => '0x' + b.toString(16).padStart(2, '0')).join(', ');
+                console.log(`Proxy sending segment for ${mediaUrl}:`);
+                console.log(`  - Content-Type: ${responseHeaders['Content-Type']}`);
+                console.log(`  - Was header stripped: ${wasHeaderStripped}`);
+                console.log(`  - Final ArrayBuffer length: ${arrayBuffer.byteLength} bytes`);
+                console.log(`  - First few bytes of data being sent: [${byteString}]`);
+                if (firstFewBytesOfOutput[0] === 0x47) { // 0x47 là 71 ở dạng thập phân
+                    console.log("  - INFO: First byte IS 0x47 (TS sync byte) - EXCELLENT SIGN!");
+                } else {
+                    console.log(`  - WARNING: First byte IS 0x${firstFewBytesOfOutput[0]?.toString(16).padStart(2, '0')}. Expected 0x47 for TS. This might still be an issue.`);
+                }
+            } else {
+                console.log(`Proxy sending EMPTY segment for ${mediaUrl} (Content-Type: ${responseHeaders['Content-Type']}) after processing.`);
+            }
+            
 			return new Response(arrayBuffer, {
-				status: binaryResponse.status,
+				status: binaryResponse.status, // Giữ status từ server gốc (có thể là 200 hoặc 206)
 				headers: responseHeaders,
 			});
 		}
 
+		// Fallback cho các nội dung dạng text khác không phải M3U8 và không phải nhị phân theo các điều kiện trên
 		return new Response(responseContentAsText, {
 			status: response.status,
 			headers: responseHeaders,
