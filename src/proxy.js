@@ -89,7 +89,7 @@ async function proxy(request) {
 
 		const contentType = response.headers.get('Content-Type') || '';
 
-		const urlIndication = mediaUrl.toLowerCase().includes('.m3u8') || mediaUrl.toLowerCase().includes('/playlist');
+		// const urlIndication = mediaUrl.toLowerCase().includes('.m3u8') || mediaUrl.toLowerCase().includes('/playlist'); // This variable was unused
 
 		let responseContent = await response.text();
 		const contentLooksLikeM3U8 = responseContent.trimStart().startsWith('#EXTM3U');
@@ -111,22 +111,39 @@ async function proxy(request) {
 			});
 		}
 
+		// If not M3U8, handle other content (including segments)
 		if (!contentLooksLikeM3U8 && responseContent.length > 0) {
 			const hasManyNonPrintable =
 				responseContent.split('').filter((char) => char.charCodeAt(0) < 32 && char !== '\n' && char !== '\r' && char !== '\t').length >
 				responseContent.length * 0.1;
 
+			// This block handles binary content like video/audio segments, images, etc.
 			if (
 				hasManyNonPrintable ||
 				contentType.includes('video/') ||
 				contentType.includes('audio/') ||
-				contentType.includes('image/') ||
+				contentType.includes('image/') || // Could be image type for segments
 				contentType.includes('application/octet-stream')
 			) {
+				// Re-fetch to get ArrayBuffer for binary manipulation
 				const binaryResponse = await fetch(mediaUrl, {
 					headers: fetchHeaders,
 				});
-				const arrayBuffer = await binaryResponse.arrayBuffer();
+				let arrayBuffer = await binaryResponse.arrayBuffer();
+
+				// --- MODIFICATION START: Remove 7-byte header from segments ---
+				// As per your request, we remove the first 7 bytes from these segments.
+				// This assumes that segments processed here might have that prepended header.
+				const BYTES_TO_STRIP = 7;
+				if (arrayBuffer.byteLength >= BYTES_TO_STRIP) {
+					// console.log(`Original segment length for ${mediaUrl}: ${arrayBuffer.byteLength} bytes.`);
+					arrayBuffer = arrayBuffer.slice(BYTES_TO_STRIP);
+					// console.log(`New segment length after stripping ${BYTES_TO_STRIP} bytes: ${arrayBuffer.byteLength} bytes.`);
+				} else {
+					// console.log(`Segment ${mediaUrl} is too short (${arrayBuffer.byteLength} bytes) to strip ${BYTES_TO_STRIP} bytes.`);
+                                }
+				// --- MODIFICATION END ---
+
 				return new Response(arrayBuffer, {
 					status: binaryResponse.status,
 					headers: responseHeaders,
@@ -134,6 +151,7 @@ async function proxy(request) {
 			}
 		}
 
+		// Fallback for other text-based content
 		return new Response(responseContent, {
 			status: response.status,
 			headers: responseHeaders,
