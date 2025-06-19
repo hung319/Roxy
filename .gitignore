@@ -172,3 +172,4 @@ dist
 .wrangler/
 **/test.*
 **/reverseProxy.*
+.vercel

@@ -65,3 +65,39 @@ or you can do this.
 ```javascript
 encodeURIComponent(JSON.stringify({ Referer: 'https://kiwik.si' }));
 ```
+
+#### Referer header
+
+Just add `ref` to the url
+
+```URL
+&ref=example.com
+```
+
+## Hianime Streams Loading Issue
+
+### 🚨 Problem
+
+Hianime video streams fail to load when accessed through Cloudflare Workers proxy instead use Vercel instance.
+
+## Root Cause
+
+Cloudflare Workers ignore custom HTTPS ports (e.g., `:2228`) in `fetch()` requests after deployment.
+
+| Environment                    | Status   |
+| ------------------------------ | -------- |
+| Development (`wrangler dev`)   | ✅ Works |
+| Production (`wrangler deploy`) | ❌ Fails |
+
+## ℹ️ Cloudflare Known Issue
+
+This is a documented limitation of Cloudflare Workers:
+
+[Fetch requests ignore non-standard HTTPS ports](https://developers.cloudflare.com/workers/platform/known-issues/#fetch-requests-ignore-non-standard-https-ports)
+
+[Custom ports for outgoing HTTPS requests from Workers are ignored · Issue #5998 · cloudflare/cloudflare-docs](https://github.com/cloudflare/cloudflare-docs/issues/5998)
+
+**Affected Scenarios:**
+
+- All `fetch()` requests to non-standard HTTPS ports (e.g., `:2228`, `:8443`)
+- Any Worker making requests to custom HTTPS ports
